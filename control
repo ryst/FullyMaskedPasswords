@@ -1,0 +1,9 @@
+Package: com.ryst.fullymaskedpasswords
+Name: Fully Masked Passwords
+Depends: mobilesubstrate, firmware (>= 7.0)
+Version: 1.2
+Architecture: iphoneos-arm
+Description: Masks the last character when entering passwords.
+Maintainer: ryst
+Author: ryst
+Section: Tweaks
