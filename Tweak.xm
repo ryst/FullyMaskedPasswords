@@ -1,18 +1,5 @@
-#ifndef kCFCoreFoundationVersionNumber_iOS_6_0
-#define kCFCoreFoundationVersionNumber_iOS_6_0 793.00
-#endif
-
-#ifndef kCFCoreFoundationVersionNumber_iOS_6_1
-#define kCFCoreFoundationVersionNumber_iOS_6_1 793.00
-#endif
-
-#ifndef kCFCoreFoundationVersionNumber_iOS_7_0
-#define kCFCoreFoundationVersionNumber_iOS_7_0 847.20
-#endif
-
-#ifndef kCFCoreFoundationVersionNumber_iOS_7_1
-#define kCFCoreFoundationVersionNumber_iOS_7_1 847.26
-#endif
+#define incrementJs @"for(var z=document.getElementsByTagName(\"input\"),x=z.length;x--;){if(z[x].type===\"password\"&&z[x].maxLength&&!z[x].maxLengthFMP){z[x].maxLengthFMP=z[x].maxLength++;}} "
+#define decrementJs @"for(var z=document.getElementsByTagName(\"input\"),x=z.length;x--;){if(z[x].type===\"password\"&&z[x].maxLengthFMP)z[x].maxLength=z[x].maxLengthFMP;z[x].maxLengthFMP=null;} "
 
 @class DOMNode;
 @class UIKBTree;
@@ -27,6 +14,7 @@
 @interface UIResponder (FullyMaskedPasswords)
 @property(assign, nonatomic) NSString* text;
 -(void)clearText;
+-(id)textInputTraits;
 @end
 
 @interface UIFieldEditor : UIScrollView
@@ -35,6 +23,10 @@
 
 @interface UITextField (FullyMaskedPasswords)
 -(id)_fieldEditor;
+@end
+
+@interface UIWebDocumentView
+-(id)formElement;
 @end
 
 @interface DOMHTMLInputElement
@@ -52,9 +44,16 @@
 -(void)evaluateJavaScript:(id)script completionHandler:(id)handler;
 @end
 
+@interface WKContentView
+-(id)textInputTraits;
+-(void)insertText:(id)text;
+-(void)deleteBackward;
+@end
+
 static bool inTouch = NO;
 static bool hideKeys = NO;
 static NSMutableArray* overridden;
+static WKContentView* currentWKContentView;
 
 void obscureLastCharacter(id field) {
 	@try {
@@ -87,42 +86,13 @@ void obscureLastCharacter(id field) {
 				}
 			}
 
-		} else if ([field isKindOfClass:[%c(WKContentView) class]]) {
-
-			NSString* incrementJs = @"for(var z=document.getElementsByTagName(\"input\"),x=z.length;x--;){if(z[x].type===\"password\"&&z[x].maxLength)z[x].maxLength++;} ";
-			NSString* decrementJs = @"for(var z=document.getElementsByTagName(\"input\"),x=z.length;x--;){if(z[x].type===\"password\"&&z[x].maxLength)z[x].maxLength--;} ";
-
-			WKWebView* webView = MSHookIvar<WKWebView*>(field, "_webView");
-
-			[webView evaluateJavaScript:incrementJs completionHandler:^(NSString* result, NSError* error) {
-				[field insertText:@"."];
-				[field deleteBackward];
-				[webView evaluateJavaScript:decrementJs completionHandler:nil];
-			}];
-
-		} else if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_7_0) {
+		} else if (![field isKindOfClass:[%c(WKContentView) class]]) {
 
 			if ([field respondsToSelector:@selector(_fieldEditor)]) {
 				UIFieldEditor* fieldEditor = [field performSelector:@selector(_fieldEditor)];
 				[fieldEditor _obscureLastCharacter];
 			}
 
-		} else if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_6_0) {
-
-			// Required because deleteBackward doesn't work.
-			if ([field isKindOfClass:[%c(DevicePINPane) class]]) {
-				return;
-			}
-
-			NSString* text = [field text];
-			[field insertText:@"."];
-			if (![[field text] isEqualToString:text]) {
-				[field deleteBackward];
-			}
-			if (![[field text] isEqualToString:text]) {
-				[field clearText];
-				[field insertText:text];
-			}
 		}
 
 	} @catch (NSException* exception) {
@@ -183,6 +153,12 @@ void obscureLastCharacter(id field) {
 }
 
 -(void)deactivateActiveKeys {
+	if (currentWKContentView) {
+		WKWebView* webView = MSHookIvar<WKWebView*>(currentWKContentView, "_webView");
+		[webView evaluateJavaScript:decrementJs completionHandler:nil];
+		currentWKContentView = nil;
+	}
+
 	%orig;
 
 	inTouch = NO;
@@ -200,23 +176,67 @@ void obscureLastCharacter(id field) {
 }
 %end
 
+%hook UIWebDocumentView
+-(void)paste:(id)menu {
+	%orig;
+	obscureLastCharacter(self.formElement);
+}
+%end
+
+%hook WKContentView
+-(void)paste:(id)menu {
+	UITextInputTraits* traits = [self textInputTraits];
+	if (traits == nil || ![traits isSecureTextEntry])
+		return %orig;
+
+	if (currentWKContentView && currentWKContentView == self) {
+		%orig;
+		[currentWKContentView insertText:@"."];
+		[currentWKContentView deleteBackward];
+	} else {
+		currentWKContentView = self;
+		WKWebView* webView = MSHookIvar<WKWebView*>(currentWKContentView, "_webView");
+		[webView evaluateJavaScript:incrementJs completionHandler:^(NSString* result, NSError* error) {
+			%orig;
+			[currentWKContentView insertText:@"."];
+			[currentWKContentView deleteBackward];
+		}];
+	}
+}
+%end
+
 %hook UIKeyboardImpl
--(void)callChanged {
-	%orig;
-
-	obscureLastCharacter(self.delegate);
-}
-%end
-
-%hook UITextField
 -(void)insertText:(NSString*)text {
-	%orig;
+	if (!self.delegate || ![self.delegate respondsToSelector:@selector(textInputTraits)])
+		return %orig;
 
-	obscureLastCharacter(self);
+	UITextInputTraits* traits = [self.delegate textInputTraits];
+	if (traits == nil || ![traits isSecureTextEntry])
+		return %orig;
+
+	if ([self.delegate isKindOfClass:[%c(WKContentView) class]]) {
+		WKContentView* delegate = (WKContentView*)self.delegate;
+		if (currentWKContentView && currentWKContentView == delegate) {
+			%orig;
+			[currentWKContentView insertText:@"."];
+			[currentWKContentView deleteBackward];
+		} else {
+			currentWKContentView = delegate;
+			WKWebView* webView = MSHookIvar<WKWebView*>(currentWKContentView, "_webView");
+			[webView evaluateJavaScript:incrementJs completionHandler:^(NSString* result, NSError* error) {
+				%orig;
+				[currentWKContentView insertText:@"."];
+				[currentWKContentView deleteBackward];
+			}];
+		}
+	} else {
+		%orig;
+		obscureLastCharacter(self.delegate);
+	}
 }
 %end
 
-%group Hook_iOS7_SpringBoard
+%group Hook_SpringBoard
 %hook SBUIAlphanumericPasscodeEntryField
 - (void)notePasscodeFieldTextDidChange {
 	%orig;
@@ -233,10 +253,8 @@ void obscureLastCharacter(id field) {
 %end
 
 %ctor {
-	if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_7_0) {
-		if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
-			%init(Hook_iOS7_SpringBoard);
-		}
+	if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
+		%init(Hook_SpringBoard);
 	}
 	%init;
 
